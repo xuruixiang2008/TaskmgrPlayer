@@ -18,6 +18,7 @@ namespace config{
 	wstring WindowTitle;
 	wstring ChildClassName;
 	int SubWindowSize;
+	int ColorRange;
 	Vec3b colorEdge;
 	Vec3b colorDark;
 	Vec3b colorBright;
@@ -58,6 +59,8 @@ namespace config{
 			DrawGrid = value == L"true";
 		else if (key == L"SubWindowSize")
 			SubWindowSize = _wtoi(value.c_str());
+		else if (key == L"ColorRange")
+			ColorRange = _wtoi(value.c_str());
 		else if (key.substr(0,5) == L"Color") {
 			Vec3b color;
 			for(int i=0;i<3;++i)
@@ -131,7 +134,7 @@ void FindWnd()
 void Binarylize(Mat& src) {
 	Mat bin, edge;
 	cvtColor(src, bin, COLOR_BGR2GRAY);
-	inRange(bin, Scalar(128, 128, 128), Scalar(255, 255, 255), bin);
+	inRange(bin, Scalar(config::ColorRange, config::ColorRange, config::ColorRange), Scalar(255, 255, 255), bin);
 
 	Canny(bin, edge, 80, 130);
 	int gridHeight = src.cols / 66.0;
