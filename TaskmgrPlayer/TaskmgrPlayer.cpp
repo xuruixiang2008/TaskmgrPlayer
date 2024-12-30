@@ -6,6 +6,7 @@
 #include <opencv.hpp>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 
 #pragma comment(lib, "winmm.lib") 
 
@@ -16,6 +17,7 @@ namespace config{
 	wstring WindowClassName;
 	wstring WindowTitle;
 	wstring ChildClassName;
+	int SubWindowSize;
 	Vec3b colorEdge;
 	Vec3b colorDark;
 	Vec3b colorBright;
@@ -54,6 +56,8 @@ namespace config{
 			ChildClassName = value;
 		else if (key == L"DrawGrid")
 			DrawGrid = value == L"true";
+		else if (key == L"SubWindowSize")
+			SubWindowSize = _wtoi(value.c_str());
 		else if (key.substr(0,5) == L"Color") {
 			Vec3b color;
 			for(int i=0;i<3;++i)
@@ -85,23 +89,25 @@ namespace config{
 	}
 };
 
-HWND EnumHWnd = 0;   //用来保存CPU使用记录窗口的句柄
+vector<HWND> EnumHWnds;//用来保存CPU使用记录窗口的句柄
 wstring ClassNameToEnum;
+int SubWindowSize;
 BOOL CALLBACK EnumChildWindowsProc(HWND hWnd, LPARAM lParam) //寻找CPU使用记录界面的子窗口ID
 {
 	wchar_t WndClassName[256];
 	GetClassName(hWnd, WndClassName, 256);
-	if (WndClassName == ClassNameToEnum && (EnumHWnd == 0 || [&hWnd]() {  //短路求值+lambda真好用 ( ´ρ`)
+	if (WndClassName == ClassNameToEnum && ([&hWnd]() {  //短路求值+lambda真好用 ( ´ρ`)
 			RECT cRect,tRect;
 			GetWindowRect(hWnd, &tRect);
-			GetWindowRect(EnumHWnd, &cRect);
+			//GetWindowRect(EnumHWnd, &cRect);
 			int tW = (tRect.right - tRect.left),
-				tH = (tRect.bottom - tRect.top),
-				cW = (cRect.right - cRect.left),
-				cH = (cRect.bottom - cRect.top);
-			return cW * cH < tW* tH;
+				tH = (tRect.bottom - tRect.top);
+				//cW = (cRect.right - cRect.left),
+				//cH = (cRect.bottom - cRect.top);
+			cout << tW * tH << endl;
+			return abs(tW * tH - SubWindowSize) < 1500;
 		}())) {
-		EnumHWnd = hWnd;
+		EnumHWnds.push_back(hWnd);
 	}
 	return true;
 }
@@ -112,9 +118,10 @@ void FindWnd()
 	HWND TaskmgrHwnd = FindWindow(config::WindowClassName.c_str(), config::WindowTitle.c_str());
 	if (TaskmgrHwnd != NULL) {
 		if (config::ChildClassName.empty())
-			EnumHWnd = TaskmgrHwnd;
+			EnumHWnds.push_back(TaskmgrHwnd);
 		else {
 			ClassNameToEnum = config::ChildClassName;
+			SubWindowSize = config::SubWindowSize;
 			EnumChildWindows(TaskmgrHwnd, EnumChildWindowsProc, NULL);
 		}
 	}
@@ -127,8 +134,8 @@ void Binarylize(Mat& src) {
 	inRange(bin, Scalar(128, 128, 128), Scalar(255, 255, 255), bin);
 
 	Canny(bin, edge, 80, 130);
-	int gridHeight = src.cols / 10.0;
-	int gridWidth = src.rows / 8.0;
+	int gridHeight = src.cols / 66.0;
+	int gridWidth = src.rows / 18.0;
 	int gridOffset = clock() / 1000 * 10;
 	for (int r = 0; r < src.rows; ++r) {
 		for (int c = 0; c < src.cols; ++c) {
@@ -156,11 +163,28 @@ string FindVideo() {
 	return "";
 }
 
+// 将 frame 分割成 4x4 等分
+vector<Mat> SplitFrame(Mat& frame, int rows = 4, int cols = 4) {
+	vector<Mat> parts;
+	int partWidth = frame.cols / cols;
+	int partHeight = frame.rows / rows;
+
+	for (int i = 0; i < rows; ++i) {
+		for (int j = 0; j < cols; ++j) {
+			Rect roi(j * partWidth, i * partHeight, partWidth, partHeight);
+			Mat subMat = frame(roi);
+			rectangle(subMat, Rect{ 0,0,subMat.cols,subMat.rows }, config::colorFrame, 0.1);
+			parts.push_back(subMat); // 将每个部分添加到 parts 中
+		}
+	}
+	return parts;
+}
+
 void Play() {
 	cout << endl << endl << "--------------------------------------" << endl;
 	config::ReadConfig();
 	FindWnd(); //寻找CPU使用记录的窗口,  函数会把窗口句柄保存在全局变量EnumHWnd
-	if (EnumHWnd == NULL) {
+	if (EnumHWnds.size() == 0) {
 		cout << "Can't find the window." << endl;
 		return;
 	}
@@ -173,17 +197,38 @@ void Play() {
 		cout << "Find video " << videoName <<".\nSplitting audio." << endl;
 		system(("ffmpeg -i " + videoName + " audio.wav -y").c_str());
 	}
-	string wndName = "innerPlayer";
-	namedWindow(wndName, WINDOW_NORMAL);
-	HWND playerWnd = FindWindowA("Main HighGUI class", wndName.c_str());
-	SetWindowLong(playerWnd, GWL_STYLE, GetWindowLong(playerWnd, GWL_STYLE) & (~(WS_BORDER | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX)));
-	SetWindowLong(playerWnd, GWL_EXSTYLE, WS_EX_TRANSPARENT | WS_EX_LAYERED);
-	SetParent(playerWnd, (EnumHWnd));
-	RECT rect;
-	GetWindowRect(EnumHWnd, &rect);
-	SetWindowPos(playerWnd, HWND_TOPMOST, 0, 0, rect.right - rect.left, rect.bottom - rect.top, SWP_SHOWWINDOW);
-	InvalidateRect(EnumHWnd, &rect, true);
-	UpdateWindow(EnumHWnd);
+
+	// Create 16 OpenCV windows
+	vector<string> wndNames;
+	for (int i = 0; i < 16; ++i) {
+		wndNames.push_back("Window " + to_string(i + 1));
+		namedWindow(wndNames[i], WINDOW_NORMAL);
+	}
+
+	vector<HWND> playerWnds;
+	for (int i = 0; i < 16; i++)
+	{
+		playerWnds.push_back(FindWindowA("Main HighGUI class", wndNames[i].c_str()));
+	}
+
+	vector<RECT> rects;
+	for (int i = 0; i < 16; i++)
+	{
+		RECT rect;
+		rects.push_back(rect);
+	}
+	for (int i = 0; i < 16; i++)
+	{
+		SetWindowLong(playerWnds[i], GWL_STYLE, GetWindowLong(playerWnds[i], GWL_STYLE) & (~(WS_BORDER | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX)));
+		SetWindowLong(playerWnds[i], GWL_EXSTYLE, WS_EX_TRANSPARENT | WS_EX_LAYERED);
+		SetParent(playerWnds[i], (EnumHWnds[i]));
+		GetWindowRect(EnumHWnds[i], &rects[i]);
+		SetWindowPos(playerWnds[i], HWND_TOPMOST, 0, 0, rects[i].right - rects[i].left, rects[i].bottom - rects[i].top, SWP_SHOWWINDOW);
+		InvalidateRect(EnumHWnds[i], &rects[i], true);
+		UpdateWindow(EnumHWnds[i]);
+	}
+
+
 	VideoCapture video(videoName);
 	
 	//_wsystem(L"cls");
@@ -195,20 +240,31 @@ void Play() {
 	int frameCount = 0;
 	for (Mat frame; video.read(frame); ++frameCount) {
 		clock_t s = clock();
-		GetWindowRect(EnumHWnd, &rect);
-		int w = rect.right - rect.left;
-		int h = rect.bottom - rect.top;
-		MoveWindow(playerWnd, 0, 0, w, h, true);
-		resize(frame, frame, Size(w, h), 0, 0, INTER_NEAREST);
+		for (int i = 0; i < 16; i++)
+		{
+			GetWindowRect(EnumHWnds[i], &rects[i]);
+			int w = rects[i].right - rects[i].left;
+			int h = rects[i].bottom - rects[i].top;
+			MoveWindow(playerWnds[i], 0, 0, w, h, true);
+			resize(frame, frame, Size(w * 4, h * 4), 0, 0, INTER_NEAREST);
+		}
+
 		Binarylize(frame);
-		imshow(wndName, frame);
+		vector<Mat> parts = SplitFrame(frame); // Split the frame into 16 parts
+		for (int i = 0; i < 16; i++)
+		{
+			imshow(wndNames[i], parts[i]);
+		}
 		SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), { 0,1 });
 
-		cout << format("Frame %d at %.3fs. output: %dx%d ,cost %d ms.", frameCount, frameCount * frameTime / 1000.0, w, h, clock() - s);
+		//cout << format("Frame %d at %.3fs. output: %dx%d ,cost %d ms.", frameCount, frameCount * frameTime / 1000.0, w, h, clock() - s);
 		for (; frameCount * frameTime > clock();)waitKey(1);
 	}
 	system("rm audio.wav");
-	destroyWindow(wndName);
+	for (int i = 0; i < 16; i++)
+	{
+		destroyWindow(wndNames[i]);
+	}
 	return;
 }
 
